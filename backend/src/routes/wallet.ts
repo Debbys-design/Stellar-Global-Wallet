@@ -10,6 +10,77 @@ import { isValidMemoText, memoTextMessage } from "@globe-wallet/sdk";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { getCachedResult, cacheResult } from "../services/idempotency";
 
+const SEP7_PAY_PREFIX = "web+stellar:pay?";
+
+interface Sep7PayFields {
+  destination: string;
+  amount?: string;
+  asset_code?: string;
+  asset_issuer?: string;
+  memo?: string;
+  memo_type?: string;
+  origin_domain?: string;
+  signature?: string;
+}
+
+function buildSep7PayUri(fields: Sep7PayFields): string {
+  const params = new URLSearchParams();
+  params.set("destination", fields.destination);
+  if (fields.amount !== undefined) params.set("amount", fields.amount);
+  if (fields.asset_code !== undefined) params.set("asset_code", fields.asset_code);
+  if (fields.asset_issuer !== undefined) params.set("asset_issuer", fields.asset_issuer);
+  if (fields.memo !== undefined) {
+    params.set("memo", fields.memo);
+    params.set("memo_type", fields.memo_type ?? "MEMO_TEXT");
+  }
+  if (fields.origin_domain !== undefined) params.set("origin_domain", fields.origin_domain);
+  if (fields.signature !== undefined) params.set("signature", fields.signature);
+  return SEP7_PAY_PREFIX + params.toString();
+}
+
+function parseSep7PayUri(uri: string): { fields: Sep7PayFields; warnings: string[] } {
+  const warnings: string[] = [];
+  if (!uri.startsWith(SEP7_PAY_PREFIX)) {
+    throw new Error("URI must start with web+stellar:pay?");
+  }
+  const query = uri.slice(SEP7_PAY_PREFIX.length);
+  const params = new URLSearchParams(query);
+  const fields: Sep7PayFields = { destination: params.get("destination") ?? "" };
+  const amount = params.get("amount");
+  if (amount !== null) fields.amount = amount;
+  const assetCode = params.get("asset_code");
+  if (assetCode !== null) fields.asset_code = assetCode;
+  const assetIssuer = params.get("asset_issuer");
+  if (assetIssuer !== null) fields.asset_issuer = assetIssuer;
+  const memo = params.get("memo");
+  if (memo !== null) fields.memo = memo;
+  const memoType = params.get("memo_type");
+  if (memoType !== null) fields.memo_type = memoType;
+  const originDomain = params.get("origin_domain");
+  if (originDomain !== null) fields.origin_domain = originDomain;
+  const signature = params.get("signature");
+  if (signature !== null) fields.signature = signature;
+
+  if (!fields.destination) {
+    warnings.push("Missing destination");
+  } else if (!isGAddress(fields.destination)) {
+    warnings.push("Destination is not a valid Stellar address");
+  }
+  if (fields.amount !== undefined && !/^\d+(\.\d{1,7})?$/.test(fields.amount)) {
+    warnings.push("Amount must be a decimal string with at most 7 decimal places");
+  }
+  if (fields.asset_code !== undefined && fields.asset_code !== "XLM" && !fields.asset_issuer) {
+    warnings.push("asset_issuer is required for non-native assets");
+  }
+  if (fields.asset_issuer !== undefined && !isGAddress(fields.asset_issuer)) {
+    warnings.push("asset_issuer is not a valid Stellar address");
+  }
+  if (fields.memo !== undefined && !isValidMemoText(fields.memo)) {
+    warnings.push(memoTextMessage);
+  }
+  return { fields, warnings };
+}
+
 async function handleIdempotentRequest(
   req: Request,
   res: Response,
@@ -48,6 +119,66 @@ export function createWalletRouter(stellar: StellarService): Router {
   const walletRouter = Router();
 
   walletRouter.use(jwtAuth);
+
+  walletRouter.post(
+    "/payment-requests",
+    body("destination")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(destinationMessage),
+    body("amount").optional().isString().matches(/^\d+(\.\d{1,7})?$/),
+    body("asset_code").optional().isString().isLength({ min: 1, max: 12 }),
+    body("asset_issuer")
+      .optional()
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(destinationMessage),
+    body("memo").optional().isString().custom(isValidMemoText).withMessage(memoTextMessage),
+    body("memo_type").optional().isIn(["MEMO_TEXT", "MEMO_ID", "MEMO_HASH", "MEMO_RETURN"]),
+    body("origin_domain").optional().isString().isLength({ max: 255 }),
+    body("signature").optional().isString().isLength({ max: 255 }),
+    (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const { destination, amount, asset_code, asset_issuer, memo, memo_type, origin_domain, signature } = req.body;
+        if (asset_code && asset_code !== "XLM" && !asset_issuer) {
+          res.status(400).json({
+            error: { code: "INVALID_ASSET", message: "asset_issuer is required for non-native assets" },
+          });
+          return;
+        }
+        const uri = buildSep7PayUri({
+          destination,
+          amount,
+          asset_code,
+          asset_issuer,
+          memo,
+          memo_type,
+          origin_domain,
+          signature,
+        });
+        res.json({ uri });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  walletRouter.post(
+    "/payment-requests/parse",
+    body("uri").isString().notEmpty(),
+    (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const { fields, warnings } = parseSep7PayUri(req.body.uri);
+        res.json({ fields, warnings });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
 
   walletRouter.post(
     "/send",
@@ -202,50 +333,12 @@ export function createWalletRouter(stellar: StellarService): Router {
       try {
         assertValidRequest(req);
         const result = await stellar.buildPartialTransaction(req.body);
-        res.json({ xdr: result.xdr, hash: result.hash });
-      } catch (err) {
-        next(err);
-      }
-    }
-  );
-
-  walletRouter.post(
-    "/submit-multisig",
-    body("xdr").isString(),
-    body("signerSecretKeys").isArray({ min: 1 }),
-    body("signerSecretKeys.*").isLength({ min: 56, max: 56 }),
-    body("idempotencyKey").optional().isString().isLength({ max: 255 }),
-    (req, res, next) => {
-      const firstSigner = Array.isArray(req.body.signerSecretKeys) ? req.body.signerSecretKeys[0] : undefined;
-      handleIdempotentRequest(req, res, next, firstSigner, () => stellar.submitWithAdditionalSignatures(req.body));
-    }
-  );
-
-  walletRouter.get(
-    "/:publicKey/thresholds",
-    param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
-    async (req, res, next) => {
-      try {
-        assertValidRequest(req);
-        const result = await stellar.getAccountThresholds(req.params.publicKey);
         res.json(result);
       } catch (err) {
         next(err);
       }
     }
   );
-
-  walletRouter.post("/keypair", async (req, res, next) => {
-    try {
-      const keypair = stellar.generateKeypair();
-      const publicKey = keypair.publicKey();
-      const secretKey = keypair.secret();
-      await logKeypairIssuance(req.header("x-api-key") ?? "", publicKey);
-      res.json({ publicKey, secretKey });
-    } catch (err) {
-      next(err);
-    }
-  });
 
   return walletRouter;
 }

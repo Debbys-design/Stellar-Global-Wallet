@@ -62,6 +62,12 @@ export class ValidationError extends AppError {
   }
 }
 
+export class Sep7Error extends AppError {
+  constructor(message: string, code = "SEP7_INVALID_URI", details?: unknown) {
+    super(message, { code, details, status: 400 });
+  }
+}
+
 export class HorizonError extends AppError {
   constructor(
     message: string,

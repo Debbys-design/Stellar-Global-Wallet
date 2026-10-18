@@ -126,6 +126,13 @@ export function createApp(
   app.use("/api/v1/config", configRouter);
   app.use("/config", configRouter);
 
+  // #69 — testnet-only Friendbot funding for one-click onboarding. The
+  // router is only mounted when the configured network is testnet, so on
+  // mainnet the path falls through to the 404 handler below.
+  if (config.STELLAR_NETWORK === "testnet") {
+    app.use("/api/v1/dev", createDevRouter());
+  }
+
   app.use((req, _res, next) => {
     next(
       new NotFoundError(

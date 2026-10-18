@@ -1,9 +1,48 @@
 import { Router } from "express";
 import { param, query } from "express-validator";
+import { z } from "zod";
 import { assertValidRequest } from "../middleware/requestValidation";
 import { StellarService } from "../services/stellar";
 import { getUnifiedActivityFeed } from "../services/activityFeed";
 import { isGAddress, publicKeyMessage } from "../utils/stellarAddress";
+import { AppError } from "../errors/appError";
+import { getDb } from "../db";
+
+// #68 — user preferences schema. Only these keys are allowed; unknown keys
+// are rejected so the stored JSONB stays predictable across web and mobile.
+const preferencesSchema = z
+  .object({
+    currency: z.string().min(1).max(16).optional(),
+    language: z.string().min(2).max(16).optional(),
+    hiddenAssets: z.array(z.string().min(1).max(128)).max(500).optional(),
+    notifications: z
+      .object({
+        email: z.boolean().optional(),
+        push: z.boolean().optional(),
+        payments: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+type Preferences = z.infer<typeof preferencesSchema>;
+
+function parsePreferences(input: unknown): Preferences {
+  const result = preferencesSchema.safeParse(input);
+  if (!result.success) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      400,
+      "Invalid preferences payload",
+      result.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      }))
+    );
+  }
+  return result.data;
+}
 
 export function createAccountRouter(stellar: StellarService): Router {
   const accountRouter = Router();
@@ -116,6 +155,50 @@ export function createAccountRouter(stellar: StellarService): Router {
       }
     }
   );
+
+  // #68 — user preferences (currency, language, hidden assets, notifications).
+  // Stored per-account in the preferences table so they sync across devices.
+  accountRouter.get("/:publicKey/preferences", async (req, res, next) => {
+    try {
+      const account = req.params.publicKey;
+      if (!isGAddress(account)) {
+        throw new AppError("VALIDATION_ERROR", 400, publicKeyMessage);
+      }
+      const db = getDb();
+      const row = await db("preferences").where({ account }).first();
+      const data = (row?.data as Preferences | undefined) ?? {};
+      res.json({
+        account,
+        preferences: data,
+        updatedAt: row?.updated_at ?? null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  accountRouter.put("/:publicKey/preferences", async (req, res, next) => {
+    try {
+      const account = req.params.publicKey;
+      if (!isGAddress(account)) {
+        throw new AppError("VALIDATION_ERROR", 400, publicKeyMessage);
+      }
+      const preferences = parsePreferences(req.body);
+      const db = getDb();
+      const now = new Date();
+      await db("preferences")
+        .insert({ account, data: preferences, updated_at: now })
+        .onConflict("account")
+        .merge({ data: preferences, updated_at: now });
+      res.json({
+        account,
+        preferences,
+        updatedAt: now.toISOString(),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   return accountRouter;
 }
