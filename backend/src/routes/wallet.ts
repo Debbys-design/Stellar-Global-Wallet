@@ -10,6 +10,91 @@ import { isValidMemoText, memoTextMessage } from "@globe-wallet/sdk";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { getCachedResult, cacheResult } from "../services/idempotency";
 
+const BASE_RESERVE_XLM = 0.5;
+
+interface ReserveBreakdown {
+  base: string;
+  trustlines: string;
+  offers: string;
+  signers: string;
+  data: string;
+  sponsoring: string;
+  sponsored: string;
+  total: string;
+  spendableXlm: string;
+}
+
+interface AssetSpendable {
+  asset: string;
+  balance: string;
+  sellingLiabilities: string;
+  spendable: string;
+}
+
+function formatAmount(value: number): string {
+  // Stellar amounts are 7-decimal precision; trim trailing zeros for readability.
+  return value.toFixed(7).replace(/\.?0+$/, "");
+}
+
+function computeReserveBreakdown(account: StellarSdk.AccountResponse): ReserveBreakdown {
+  const subentryCount = account.subentry_count ?? 0;
+  const numSponsoring = account.num_sponsoring ?? 0;
+  const numSponsored = account.num_sponsored ?? 0;
+
+  const trustlines = account.balances.filter((b) => b.asset_type !== "native").length;
+  const offers = account.offers?.length ?? 0;
+  const signers = Math.max((account.signers?.length ?? 1) - 1, 0);
+  const data = Object.keys(account.data ?? {}).length;
+
+  // Subentries are trustlines + offers + signers + data. Sponsoring adds a
+  // reserve per sponsored entry; being sponsored removes one.
+  const base = BASE_RESERVE_XLM * 2;
+  const trustlinesReserve = BASE_RESERVE_XLM * trustlines;
+  const offersReserve = BASE_RESERVE_XLM * offers;
+  const signersReserve = BASE_RESERVE_XLM * signers;
+  const dataReserve = BASE_RESERVE_XLM * data;
+  const sponsoringReserve = BASE_RESERVE_XLM * numSponsoring;
+  const sponsoredReserve = BASE_RESERVE_XLM * numSponsored;
+
+  const total =
+    (2 + subentryCount + numSponsoring - numSponsored) * BASE_RESERVE_XLM;
+
+  const native = account.balances.find((b) => b.asset_type === "native");
+  const nativeBalance = native ? parseFloat(native.balance) : 0;
+  const nativeSelling = native ? parseFloat(native.selling_liabilities ?? "0") : 0;
+  const spendableXlm = Math.max(nativeBalance - total - nativeSelling, 0);
+
+  return {
+    base: formatAmount(base),
+    trustlines: formatAmount(trustlinesReserve),
+    offers: formatAmount(offersReserve),
+    signers: formatAmount(signersReserve),
+    data: formatAmount(dataReserve),
+    sponsoring: formatAmount(sponsoringReserve),
+    sponsored: formatAmount(sponsoredReserve),
+    total: formatAmount(total),
+    spendableXlm: formatAmount(spendableXlm),
+  };
+}
+
+function computeAssetSpendable(account: StellarSdk.AccountResponse): AssetSpendable[] {
+  return account.balances.map((b) => {
+    const asset =
+      b.asset_type === "native"
+        ? "XLM"
+        : `${b.asset_code}:${b.asset_issuer}`;
+    const balance = parseFloat(b.balance);
+    const sellingLiabilities = parseFloat(b.selling_liabilities ?? "0");
+    const spendable = Math.max(balance - sellingLiabilities, 0);
+    return {
+      asset,
+      balance: formatAmount(balance),
+      sellingLiabilities: formatAmount(sellingLiabilities),
+      spendable: formatAmount(spendable),
+    };
+  });
+}
+
 async function handleIdempotentRequest(
   req: Request,
   res: Response,
@@ -48,6 +133,26 @@ export function createWalletRouter(stellar: StellarService): Router {
   const walletRouter = Router();
 
   walletRouter.use(jwtAuth);
+
+  walletRouter.get(
+    "/accounts/:publicKey/reserves",
+    param("publicKey")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(publicKeyMessage),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const account = await stellar.server.loadAccount(req.params.publicKey);
+        const reserves = computeReserveBreakdown(account);
+        const assets = computeAssetSpendable(account);
+        res.json({ reserves, assets });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
 
   walletRouter.post(
     "/send",
@@ -202,50 +307,12 @@ export function createWalletRouter(stellar: StellarService): Router {
       try {
         assertValidRequest(req);
         const result = await stellar.buildPartialTransaction(req.body);
-        res.json({ xdr: result.xdr, hash: result.hash });
-      } catch (err) {
-        next(err);
-      }
-    }
-  );
-
-  walletRouter.post(
-    "/submit-multisig",
-    body("xdr").isString(),
-    body("signerSecretKeys").isArray({ min: 1 }),
-    body("signerSecretKeys.*").isLength({ min: 56, max: 56 }),
-    body("idempotencyKey").optional().isString().isLength({ max: 255 }),
-    (req, res, next) => {
-      const firstSigner = Array.isArray(req.body.signerSecretKeys) ? req.body.signerSecretKeys[0] : undefined;
-      handleIdempotentRequest(req, res, next, firstSigner, () => stellar.submitWithAdditionalSignatures(req.body));
-    }
-  );
-
-  walletRouter.get(
-    "/:publicKey/thresholds",
-    param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
-    async (req, res, next) => {
-      try {
-        assertValidRequest(req);
-        const result = await stellar.getAccountThresholds(req.params.publicKey);
         res.json(result);
       } catch (err) {
         next(err);
       }
     }
   );
-
-  walletRouter.post("/keypair", async (req, res, next) => {
-    try {
-      const keypair = stellar.generateKeypair();
-      const publicKey = keypair.publicKey();
-      const secretKey = keypair.secret();
-      await logKeypairIssuance(req.header("x-api-key") ?? "", publicKey);
-      res.json({ publicKey, secretKey });
-    } catch (err) {
-      next(err);
-    }
-  });
 
   return walletRouter;
 }
