@@ -1,74 +1,54 @@
-name: Contract bindings pipeline
-
-# Keeps packages/bindings/* (and, transitively, @globe-wallet/sdk) in sync
-# with the globe-wallet contract's actual interface. Builds the contract to
-# wasm, regenerates its TypeScript bindings straight from that wasm's spec,
-# and fails if the regenerated output differs from what's committed — so a
-# contract interface change can never silently leave the SDK stale.
-#
-# Runs from the wasm it builds (not the deployed testnet contract), so it
-# catches an interface change in the same PR that makes it, before anything
-# is deployed.
+name: Contract Bindings
 
 on:
   push:
+    branches: [main]
     paths:
-      - "contract/contracts/globe-wallet/**"
-      - "contract/Cargo.toml"
-      - "packages/bindings/**"
-      - ".github/workflows/contract-bindings.yml"
+      - 'contract/contracts/globe-wallet/**'
+      - 'contract/contracts/token-wrapper/**'
+      - 'contract/scripts/bindings.sh'
+      - '.github/workflows/contract-bindings.yml'
   pull_request:
     paths:
-      - "contract/contracts/globe-wallet/**"
-      - "contract/Cargo.toml"
-      - "packages/bindings/**"
-      - ".github/workflows/contract-bindings.yml"
-
-permissions:
-  contents: read
+      - 'contract/contracts/globe-wallet/**'
+      - 'contract/contracts/token-wrapper/**'
+      - 'contract/scripts/bindings.sh'
+      - '.github/workflows/contract-bindings.yml'
 
 jobs:
-  bindings-and-sdk:
+  bindings:
+    name: Generate & verify TypeScript bindings
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Build globe-wallet contract wasm
-        working-directory: contract
-        run: cargo build --target wasm32-unknown-unknown --release -p globe-wallet
-
       - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli --version 27.0.0
+        run: cargo install --locked stellar-cli --features opt
 
-      - name: Regenerate globe-wallet bindings from the built wasm
-        run: |
-          stellar contract bindings typescript \
-            --wasm contract/target/wasm32-unknown-unknown/release/globe_wallet.wasm \
-            --output-dir packages/bindings/globe-wallet \
-            --overwrite
+      - name: Generate bindings
+        run: bash contract/scripts/bindings.sh
 
-      - name: Fail if regenerated bindings differ from what's committed
+      - name: Fail if generated bindings are stale
         run: |
-          git diff --exit-code -- packages/bindings/globe-wallet/src || {
-            echo "::error::packages/bindings/globe-wallet/src is stale. The contract's interface changed — run the 'Regenerate globe-wallet bindings' step locally and commit the result."
+          if [[ -n "$(git status --porcelain packages/bindings/globe-wallet packages/bindings/token-wrapper)" ]]; then
+            echo "error: generated bindings are out of date. Run contract/scripts/bindings.sh and commit the result." >&2
+            git --no-pager diff -- packages/bindings/globe-wallet packages/bindings/token-wrapper
             exit 1
-          }
+          fi
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      - name: Install workspace dependencies
-        run: npm install
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Type-check SDK against the (possibly regenerated) bindings
-        run: npm run type-check --workspace=@globe-wallet/sdk
+      - name: Type-check SDK against bindings
+        run: npm run type-check --workspace packages/sdk

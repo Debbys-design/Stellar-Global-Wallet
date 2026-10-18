@@ -68,6 +68,29 @@ once that spec exists). Until then:
   note) should be updated to link it instead of the API docs directly —
   don't let this doc silently go stale once that lands.
 
+## Contract TypeScript bindings
+
+TypeScript bindings for the Soroban contracts are generated with
+`stellar contract bindings typescript` and published into the workspace
+so the web and mobile apps can import typed clients instead of
+hand-rolling contract calls. The generation is driven by
+[`contract/scripts/bindings.sh`](contract/scripts/bindings.sh) and run in
+CI by [`.github/workflows/contract-bindings.yml`](.github/workflows/contract-bindings.yml).
+
+Both contracts are covered:
+
+- `globe-wallet` — the wallet contract (see
+  [#75](https://github.com/Genghis-codes/Stellar-Global-Wallet/issues/75)).
+- `token-wrapper` — the token-wrapper contract (see
+  [#76](https://github.com/Genghis-codes/Stellar-Global-Wallet/issues/76)).
+
+To regenerate locally, run `contract/scripts/bindings.sh` from the repo
+root; the generated packages land in the workspace alongside the
+contracts. Don't hand-edit generated bindings — change the contract or
+the script and regenerate. When a contract's public API changes, update
+the script's contract list if a new contract is added, and note the
+regenerated bindings in the PR description.
+
 ## PR flow
 
 Same flow as the rest of the repo (see the
