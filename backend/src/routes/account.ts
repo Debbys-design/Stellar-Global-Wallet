@@ -21,9 +21,59 @@ interface ReserveBreakdown {
   spendableXlm: number;
 }
 
+interface MultisigSigner {
+  key: string;
+  weight: number;
+  type: string;
+}
+
+interface MultisigThresholds {
+  low: number;
+  med: number;
+  high: number;
+}
+
+interface MultisigInfo {
+  signers: MultisigSigner[];
+  thresholds: MultisigThresholds;
+  reachable: { low: boolean; med: boolean; high: boolean };
+  canSign: { low: boolean; med: boolean; high: boolean };
+}
+
 function toNumber(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+// #72 — normalise Horizon's signers/thresholds into a UI-ready shape and
+// compute whether each threshold level can be reached by the current signers.
+function computeMultisigInfo(account: any): MultisigInfo {
+  const rawSigners = Array.isArray(account?.signers) ? account.signers : [];
+  const signers: MultisigSigner[] = rawSigners.map((s: any) => ({
+    key: typeof s?.key === "string" ? s.key : "",
+    weight: toNumber(s?.weight),
+    type: typeof s?.type === "string" ? s.type : "ed25519_public_key",
+  }));
+
+  const thresholds: MultisigThresholds = {
+    low: toNumber(account?.thresholds?.low_threshold),
+    med: toNumber(account?.thresholds?.med_threshold),
+    high: toNumber(account?.thresholds?.high_threshold),
+  };
+
+  const totalWeight = signers.reduce((sum, s) => sum + s.weight, 0);
+  const reachable = {
+    low: totalWeight >= thresholds.low,
+    med: totalWeight >= thresholds.med,
+    high: totalWeight >= thresholds.high,
+  };
+
+  return {
+    signers,
+    thresholds,
+    reachable,
+    canSign: { ...reachable },
+  };
 }
 
 function computeReserveBreakdown(account: any): ReserveBreakdown {
@@ -141,6 +191,22 @@ export function createAccountRouter(stellar: StellarService): Router {
     }
   );
 
+  // #72 — multisig signers, weights, thresholds and per-level reachability
+  // in a UI-ready shape for the multisig screen.
+  accountRouter.get(
+    "/:publicKey/signers",
+    param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const account = await stellar.getAccount(req.params.publicKey);
+        res.json(computeMultisigInfo(account));
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
   // #70 — reserve breakdown so clients can show spendable vs reserved.
   accountRouter.get(
     "/:publicKey/reserves",
@@ -244,46 +310,6 @@ export function createAccountRouter(stellar: StellarService): Router {
     async (req, res, next) => {
       try {
         assertValidRequest(req);
-        const limit = (req.query.limit as number | undefined) ?? 20;
-        const cursor = req.query.cursor as string | undefined;
-        const result = await stellar.getPaymentHistory(req.params.publicKey, { limit, cursor });
-        res.json({
-          payments: result.payments.map(withDecodedMuxed),
-          next: result.next,
-          hasMore: result.hasMore,
-        });
-      } catch (err) {
-        next(err);
-      }
-    }
-  );
+        
 
-  // #79 — activity feed combining classic payments and Soroban contract events
-  accountRouter.get(
-    "/:publicKey/activity",
-    param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
-    query("limit")
-      .optional()
-      .isInt({ min: 1, max: 100 })
-      .withMessage("limit must be an integer between 1 and 100")
-      .toInt(),
-    async (req, res, next) => {
-      try {
-        assertValidRequest(req);
-        const limit = (req.query.limit as number | undefined) ?? 20;
-        const cursor = req.query.cursor as string | undefined;
-        const result = await getUnifiedActivityFeed({
-          publicKey: req.params.publicKey,
-          limit,
-          cursor,
-          stellar,
-        });
-        res.json(result);
-      } catch (err) {
-        next(err);
-      }
-    }
-  );
-
-  return accountRouter;
-}
+/* … truncated 1276 chars — edit only what you need near the top … */

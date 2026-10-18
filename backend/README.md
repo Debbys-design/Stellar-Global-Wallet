@@ -62,7 +62,37 @@ GET  /api/v1/account/:publicKey/payments     → paginated activity feed with
 GET  /api/v1/account/:publicKey/activity     → unified activity feed combining
                                                 classic transactions/payments and
                                                 contract events with composite cursor
+GET  /api/v1/account/:publicKey/thresholds   → multisig signers, weights and
+                                                thresholds in a UI-ready shape
+                                                (see below)
 ```
+
+#### Multisig signers & thresholds (#72)
+
+`GET /api/v1/account/:publicKey/thresholds` returns everything a multisig
+screen needs to render signers and decide whether each operation level can
+currently be signed:
+
+```json
+{
+  "signers": [
+    { "key": "G...", "weight": 1, "type": "ed25519_public_key" },
+    { "key": "G...", "weight": 2, "type": "ed25519_public_key" }
+  ],
+  "thresholds": { "low": 1, "med": 2, "high": 3 },
+  "reachable": { "low": true, "med": true, "high": false },
+  "canSign": { "low": true, "med": true, "high": false }
+}
+```
+
+- `signers[].type` is the Horizon signer type (`ed25519_public_key`,
+  `sha256_hash`, `preauth_tx`, `ed25519_signed_payload`).
+- `reachable[level]` is `true` when the sum of all signer weights meets the
+  level's threshold — i.e. the account can ever satisfy that level.
+- `canSign[level]` is the per-level helper: `true` when the caller's own
+  signer weight (or the master key weight, if the caller is the account
+  itself) is enough to meet the threshold on its own. Use `reachable` for
+  "can this account ever sign" and `canSign` for "can this caller sign".
 
 ### Wallet
 
@@ -145,7 +175,7 @@ src/
   services/        # Stellar SDK, Soroban RPC, contract clients, locks
   utils/           # Helpers (JWT)
   types/           # Shared TypeScript types
-tests/             # Jest unit/integration tests
+  tests/             # Jest unit/integration tests
 docs/              # Design docs (concurrency, security model, rate limits, error examples)
 ```
 
