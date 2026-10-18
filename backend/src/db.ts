@@ -32,4 +32,42 @@ export async function ensureAuditTable() {
 
   // #90 — verified email table for email notification fallback.
   await ensureVerifiedEmailsTable(pool);
+
+  // #77 — durable contract event index for wallet history.
+  await ensureContractEventsTables();
+}
+
+/**
+ * #77 — contract event indexer storage.
+ *
+ * `contract_events` holds normalised Soroban contract events keyed by the
+ * RPC event id (unique, so re-ingesting the same event is a no-op).
+ * `indexer_state` stores the polling cursor (last processed ledger) so the
+ * worker resumes after a restart.
+ */
+export async function ensureContractEventsTables() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contract_events (
+      id TEXT PRIMARY KEY,
+      ledger BIGINT NOT NULL,
+      tx_hash VARCHAR(64) NOT NULL,
+      type VARCHAR(32) NOT NULL,
+      topics JSONB NOT NULL DEFAULT '[]'::jsonb,
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS contract_events_ledger_idx
+      ON contract_events (ledger)
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS indexer_state (
+      name TEXT PRIMARY KEY,
+      cursor_ledger BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
 }
