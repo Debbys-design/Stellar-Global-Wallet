@@ -65,6 +65,7 @@ This repo is an npm workspace root (`backend`, `packages/*`) — run `npm instal
 | 🛰️ Local Stellar network | `docker compose --profile local up -d stellar` then `contract/scripts/deploy-local.sh` — avoids testnet resets/Friendbot limits, see [`contract/README.md`](contract/README.md) |
 | 📜 Contracts | `cd contract && cargo test --workspace` |
 | 📦 SDK / packages | `npm install && npm run build --workspaces` (from the repo root) |
+| 🔗 Contract bindings | `contract/scripts/bindings.sh` — regenerates `packages/bindings/globe-wallet` and `packages/bindings/token-wrapper` |
 | 🧪 Seeded Demo Wallet | `npm run seed:demo --workspace backend` — provisions 5 testnet accounts, assets, limits, and recovery state |
 | 🖥️ / 📱 Apps | Not built yet. This is a great place to start contributing! |
 
@@ -99,7 +100,7 @@ flowchart LR
 | `backend.yml` | `backend/` changes | Type-check, Jest tests |
 | `contract.yml` | `contract/` changes | `cargo check`, `cargo test` |
 | `packages.yml` | `packages/*` changes | Lint, type-check, test, build each package |
-| `contract-bindings.yml` | `contract/contracts/globe-wallet/**` changes | Rebuilds the contract wasm, regenerates `packages/bindings/globe-wallet`, fails if stale, type-checks the SDK against it |
+| `contract-bindings.yml` | `contract/contracts/globe-wallet/**` or `contract/contracts/token-wrapper/**` changes | Rebuilds the contract wasm, regenerates `packages/bindings/globe-wallet` and `packages/bindings/token-wrapper`, fails if stale, type-checks the SDK against them |
 | `release.yml` | PRs and pushes to `main` | Dry-runs (PRs) or performs (`main`, via Changesets) the npm release of `packages/*` |
 
 ## ⚠️ Status

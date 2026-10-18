@@ -18,3 +18,21 @@ describe("GET /api/v1/flags", () => {
     expect(res.body.flags).toEqual(DEFAULT_FEATURE_FLAGS);
   });
 });
+
+describe("POST /api/v1/dev/fund", () => {
+  const app = createApp();
+
+  it("validates the account address at the edge", async () => {
+    const res = await request(app)
+      .post("/api/v1/dev/fund")
+      .send({ account: "not-a-stellar-address" });
+
+    // On mainnet the dev router is not mounted at all (404); on testnet the
+    // request is rejected by validation (400). Either way it must not 500.
+    expect([400, 404]).toContain(res.status);
+    if (res.status === 400) {
+      expect(res.body.error).toBeDefined();
+      expect(res.body.error.code).toBeDefined();
+    }
+  });
+});

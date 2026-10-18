@@ -32,4 +32,35 @@ export async function ensureAuditTable() {
 
   // #90 — verified email table for email notification fallback.
   await ensureVerifiedEmailsTable(pool);
+
+  // #74 — pending multisig transaction store for co-signers.
+  await ensurePendingTxsTable(pool);
+}
+
+export async function ensurePendingTxsTable(db: Pool) {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS pending_txs (
+      id BIGSERIAL PRIMARY KEY,
+      account VARCHAR(56) NOT NULL,
+      xdr TEXT NOT NULL,
+      required_weight INTEGER NOT NULL,
+      collected_signers JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_by VARCHAR(56) NOT NULL,
+      expires_at TIMESTAMPTZ,
+      status VARCHAR(16) NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS pending_txs_account_status_idx
+      ON pending_txs (account, status)
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS pending_txs_expires_at_idx
+      ON pending_txs (expires_at)
+      WHERE status = 'pending'
+  `);
 }

@@ -1,163 +1,47 @@
 import { Router } from "express";
-import { body, param, query } from "express-validator";
+import { param, query } from "express-validator";
+import { z } from "zod";
 import { assertValidRequest } from "../middleware/requestValidation";
 import { StellarService } from "../services/stellar";
 import { getUnifiedActivityFeed } from "../services/activityFeed";
 import { isGAddress, publicKeyMessage } from "../utils/stellarAddress";
-import { MuxedAccount } from "@stellar/stellar-sdk";
+import { AppError } from "../errors/appError";
+import { getDb } from "../db";
 
-const BASE_RESERVE_XLM = 0.5;
-const BASE_ACCOUNT_RESERVES = 2;
+// #68 — user preferences schema. Only these keys are allowed; unknown keys
+// are rejected so the stored JSONB stays predictable across web and mobile.
+const preferencesSchema = z
+  .object({
+    currency: z.string().min(1).max(16).optional(),
+    language: z.string().min(2).max(16).optional(),
+    hiddenAssets: z.array(z.string().min(1).max(128)).max(500).optional(),
+    notifications: z
+      .object({
+        email: z.boolean().optional(),
+        push: z.boolean().optional(),
+        payments: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
 
-interface ReserveBreakdown {
-  base: number;
-  trustlines: number;
-  offers: number;
-  signers: number;
-  data: number;
-  sponsoring: number;
-  sponsored: number;
-  total: number;
-  spendableXlm: number;
-}
+type Preferences = z.infer<typeof preferencesSchema>;
 
-interface MultisigSigner {
-  key: string;
-  weight: number;
-  type: string;
-}
-
-interface MultisigThresholds {
-  low: number;
-  med: number;
-  high: number;
-}
-
-interface MultisigInfo {
-  signers: MultisigSigner[];
-  thresholds: MultisigThresholds;
-  reachable: { low: boolean; med: boolean; high: boolean };
-  canSign: { low: boolean; med: boolean; high: boolean };
-}
-
-function toNumber(value: unknown): number {
-  const n = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
-
-// #72 — normalise Horizon's signers/thresholds into a UI-ready shape and
-// compute whether each threshold level can be reached by the current signers.
-function computeMultisigInfo(account: any): MultisigInfo {
-  const rawSigners = Array.isArray(account?.signers) ? account.signers : [];
-  const signers: MultisigSigner[] = rawSigners.map((s: any) => ({
-    key: typeof s?.key === "string" ? s.key : "",
-    weight: toNumber(s?.weight),
-    type: typeof s?.type === "string" ? s.type : "ed25519_public_key",
-  }));
-
-  const thresholds: MultisigThresholds = {
-    low: toNumber(account?.thresholds?.low_threshold),
-    med: toNumber(account?.thresholds?.med_threshold),
-    high: toNumber(account?.thresholds?.high_threshold),
-  };
-
-  const totalWeight = signers.reduce((sum, s) => sum + s.weight, 0);
-  const reachable = {
-    low: totalWeight >= thresholds.low,
-    med: totalWeight >= thresholds.med,
-    high: totalWeight >= thresholds.high,
-  };
-
-  return {
-    signers,
-    thresholds,
-    reachable,
-    canSign: { ...reachable },
-  };
-}
-
-function computeReserveBreakdown(account: any): ReserveBreakdown {
-  const subentryCount = toNumber(account?.subentry_count);
-  const numSponsoring = toNumber(account?.num_sponsoring);
-  const numSponsored = toNumber(account?.num_sponsored);
-
-  const trustlines = Array.isArray(account?.balances)
-    ? account.balances.filter((b: any) => b?.asset_type !== "native").length
-    : 0;
-  const offers = Array.isArray(account?.offers) ? account.offers.length : 0;
-  const signers = Array.isArray(account?.signers)
-    ? Math.max(account.signers.length - 1, 0)
-    : 0;
-  const data = Array.isArray(account?.data) ? account.data.length : 0;
-
-  const base = BASE_ACCOUNT_RESERVES * BASE_RESERVE_XLM;
-  const trustlinesReserve = trustlines * BASE_RESERVE_XLM;
-  const offersReserve = offers * BASE_RESERVE_XLM;
-  const signersReserve = signers * BASE_RESERVE_XLM;
-  const dataReserve = data * BASE_RESERVE_XLM;
-  const sponsoringReserve = numSponsoring * BASE_RESERVE_XLM;
-  const sponsoredReserve = numSponsored * BASE_RESERVE_XLM;
-
-  const total =
-    (BASE_ACCOUNT_RESERVES + subentryCount + numSponsoring - numSponsored) *
-    BASE_RESERVE_XLM;
-
-  const nativeBalance = Array.isArray(account?.balances)
-    ? account.balances.find((b: any) => b?.asset_type === "native")
-    : undefined;
-  const nativeAmount = toNumber(nativeBalance?.balance);
-  const sellingLiabilities = toNumber(nativeBalance?.selling_liabilities);
-  const spendableXlm = Math.max(nativeAmount - sellingLiabilities - total, 0);
-
-  return {
-    base,
-    trustlines: trustlinesReserve,
-    offers: offersReserve,
-    signers: signersReserve,
-    data: dataReserve,
-    sponsoring: sponsoringReserve,
-    sponsored: sponsoredReserve,
-    total,
-    spendableXlm,
-  };
-}
-
-// #71 — decode a muxed (M...) address into its base account and id. Returns
-// null when the value is not a valid muxed address so callers can fall back
-// to the raw value without throwing.
-function decodeMuxedAddress(value: unknown): { baseAccount: string; id: string } | null {
-  if (typeof value !== "string" || !value.startsWith("M")) {
-    return null;
+function parsePreferences(input: unknown): Preferences {
+  const result = preferencesSchema.safeParse(input);
+  if (!result.success) {
+    throw new AppError(
+      "VALIDATION_ERROR",
+      400,
+      "Invalid preferences payload",
+      result.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      }))
+    );
   }
-  try {
-    const muxed = MuxedAccount.fromAddress(value, "0");
-    return {
-      baseAccount: muxed.baseAccount().accountId(),
-      id: muxed.id(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-// #71 — attach decoded muxed info to a history item when its source account
-// is a muxed address, leaving the original fields untouched.
-function withDecodedMuxed(item: any): any {
-  if (!item || typeof item !== "object") {
-    return item;
-  }
-  const decoded = decodeMuxedAddress(item.source_account);
-  if (!decoded) {
-    return item;
-  }
-  return {
-    ...item,
-    muxed: {
-      address: item.source_account,
-      baseAccount: decoded.baseAccount,
-      id: decoded.id,
-    },
-  };
+  return result.data;
 }
 
 export function createAccountRouter(stellar: StellarService): Router {
@@ -312,4 +196,49 @@ export function createAccountRouter(stellar: StellarService): Router {
         assertValidRequest(req);
         
 
-/* … truncated 1276 chars — edit only what you need near the top … */
+  // #68 — user preferences (currency, language, hidden assets, notifications).
+  // Stored per-account in the preferences table so they sync across devices.
+  accountRouter.get("/:publicKey/preferences", async (req, res, next) => {
+    try {
+      const account = req.params.publicKey;
+      if (!isGAddress(account)) {
+        throw new AppError("VALIDATION_ERROR", 400, publicKeyMessage);
+      }
+      const db = getDb();
+      const row = await db("preferences").where({ account }).first();
+      const data = (row?.data as Preferences | undefined) ?? {};
+      res.json({
+        account,
+        preferences: data,
+        updatedAt: row?.updated_at ?? null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  accountRouter.put("/:publicKey/preferences", async (req, res, next) => {
+    try {
+      const account = req.params.publicKey;
+      if (!isGAddress(account)) {
+        throw new AppError("VALIDATION_ERROR", 400, publicKeyMessage);
+      }
+      const preferences = parsePreferences(req.body);
+      const db = getDb();
+      const now = new Date();
+      await db("preferences")
+        .insert({ account, data: preferences, updated_at: now })
+        .onConflict("account")
+        .merge({ data: preferences, updated_at: now });
+      res.json({
+        account,
+        preferences,
+        updatedAt: now.toISOString(),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  return accountRouter;
+}

@@ -13,6 +13,7 @@ import { flagsRouter } from "./routes/flags";
 import { devicesRouter } from "./routes/devices";
 import { emailRouter } from "./routes/email";
 import { createConfigRouter } from "./routes/config";
+import { createPendingTxRouter } from "./routes/pendingTx";
 import { localeMiddleware } from "./middleware/locale";
 import { errorHandler } from "./middleware/errorHandler";
 import { config } from "./config";
@@ -79,6 +80,9 @@ export function createApp(
   // `express.json` for every other route is then a no-op for these paths.
   app.use("/api/v1/wallet/fee-bump", express.json({ limit: "64kb" }));
   app.use("/api/v1/wallet/submit-multisig", express.json({ limit: "64kb" }));
+  // #74 — pending multisig store: create/add-signature/submit all carry an
+  // XDR envelope (plus a signature), so they need the same larger limit.
+  app.use("/api/v1/pending-txs", express.json({ limit: "64kb" }));
   app.use(express.json({ limit: "10kb" }));
 
   app.use(
@@ -115,10 +119,19 @@ export function createApp(
   app.use("/api/v1/me/devices", devicesRouter);
   // #90 — email notification fallback (verified email management)
   app.use("/api/v1/me/email", emailRouter);
+  // #74 — pending multisig transaction store for co-signers
+  app.use("/api/v1/pending-txs", createPendingTxRouter(stellar));
   // #81 — Expose network, Horizon/RPC URLs, and pending upgrade timelock state
   const configRouter = createConfigRouter(globeWallet);
   app.use("/api/v1/config", configRouter);
   app.use("/config", configRouter);
+
+  // #69 — testnet-only Friendbot funding for one-click onboarding. The
+  // router is only mounted when the configured network is testnet, so on
+  // mainnet the path falls through to the 404 handler below.
+  if (config.STELLAR_NETWORK === "testnet") {
+    app.use("/api/v1/dev", createDevRouter());
+  }
 
   app.use((req, _res, next) => {
     next(

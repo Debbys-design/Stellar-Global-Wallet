@@ -81,6 +81,25 @@ const envSchema = z.object({
   // until a curated list exists (#54): every issued (non-native) asset is
   // flagged "unknown_asset" until explicitly added here.
   VERIFIED_ASSETS: z.string().default(""),
+
+  // #77 — contract event indexer. The worker polls Soroban RPC getEvents
+  // filtered by GLOBE_WALLET_CONTRACT_ID and persists a cursor in the
+  // indexer_state table so restarts resume where they left off. These knobs
+  // let ops tune polling without a deploy.
+  //
+  // Ledger to start indexing from when no cursor exists yet (e.g. the
+  // contract's deploy ledger). `npm run indexer:backfill -- --from-ledger N`
+  // overrides this for a one-off backfill run.
+  INDEXER_START_LEDGER: z.coerce.number().int().min(0).default(0),
+  // How often the worker polls getEvents, in milliseconds.
+  INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
+  // Max events requested per getEvents page (RPC caps this at 10000).
+  INDEXER_PAGE_SIZE: z.coerce.number().int().positive().max(10000).default(200),
+  // RPC only retains recent events (~7 days on testnet). If the stored
+  // cursor falls further behind the latest ledger than this many ledgers,
+  // the worker logs an alert because the retention gap means events were
+  // permanently lost and a backfill from an archive source is required.
+  INDEXER_RETENTION_GAP_LEDGERS: z.coerce.number().int().positive().default(120960),
 });
 
 export const config = envSchema.parse(process.env);

@@ -11,7 +11,9 @@
     "test:e2e": "E2E_TESTNET=1 jest --config jest.e2e.config.js",
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit",
-    "seed:demo": "tsx scripts/seed-demo-wallet.ts"
+    "seed:demo": "tsx scripts/seed-demo-wallet.ts",
+    "indexer": "tsx src/indexer/run.ts",
+    "indexer:backfill": "tsx src/indexer/backfill.ts"
   },
   "dependencies": {
     "@globe-wallet/sdk": "^0.1.0",
