@@ -1,9 +1,10 @@
 import { Router } from "express";
-import { param, query } from "express-validator";
+import { body, param, query } from "express-validator";
 import { assertValidRequest } from "../middleware/requestValidation";
 import { StellarService } from "../services/stellar";
 import { getUnifiedActivityFeed } from "../services/activityFeed";
 import { isGAddress, publicKeyMessage } from "../utils/stellarAddress";
+import { MuxedAccount } from "@stellar/stellar-sdk";
 
 const BASE_RESERVE_XLM = 0.5;
 const BASE_ACCOUNT_RESERVES = 2;
@@ -71,6 +72,44 @@ function computeReserveBreakdown(account: any): ReserveBreakdown {
   };
 }
 
+// #71 — decode a muxed (M...) address into its base account and id. Returns
+// null when the value is not a valid muxed address so callers can fall back
+// to the raw value without throwing.
+function decodeMuxedAddress(value: unknown): { baseAccount: string; id: string } | null {
+  if (typeof value !== "string" || !value.startsWith("M")) {
+    return null;
+  }
+  try {
+    const muxed = MuxedAccount.fromAddress(value, "0");
+    return {
+      baseAccount: muxed.baseAccount().accountId(),
+      id: muxed.id(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// #71 — attach decoded muxed info to a history item when its source account
+// is a muxed address, leaving the original fields untouched.
+function withDecodedMuxed(item: any): any {
+  if (!item || typeof item !== "object") {
+    return item;
+  }
+  const decoded = decodeMuxedAddress(item.source_account);
+  if (!decoded) {
+    return item;
+  }
+  return {
+    ...item,
+    muxed: {
+      address: item.source_account,
+      baseAccount: decoded.baseAccount,
+      id: decoded.id,
+    },
+  };
+}
+
 export function createAccountRouter(stellar: StellarService): Router {
   const accountRouter = Router();
 
@@ -128,6 +167,43 @@ export function createAccountRouter(stellar: StellarService): Router {
     }
   );
 
+  // #71 — generate a muxed (M...) address for a base account and id so
+  // exchanges/custodial services can tag deposits.
+  accountRouter.post(
+    "/:publicKey/muxed",
+    param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
+    body("id")
+      .exists({ checkFalsy: false })
+      .withMessage("id is required")
+      .custom((value) => {
+        const str = typeof value === "number" ? String(value) : value;
+        if (typeof str !== "string" || !/^\d+$/.test(str)) {
+          throw new Error("id must be a non-negative integer string");
+        }
+        if (BigInt(str) > BigInt("18446744073709551615")) {
+          throw new Error("id must fit in an unsigned 64-bit integer");
+        }
+        return true;
+      }),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const id = String(req.body.id);
+        const muxed = new MuxedAccount(
+          MuxedAccount.fromAddress(req.params.publicKey, id).baseAccount(),
+          id
+        );
+        res.json({
+          address: muxed.accountId(),
+          baseAccount: req.params.publicKey,
+          id,
+        });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
   accountRouter.get(
     "/:publicKey/transactions",
     param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
@@ -143,7 +219,7 @@ export function createAccountRouter(stellar: StellarService): Router {
         const cursor = req.query.cursor as string | undefined;
         const result = await stellar.getTransactions(req.params.publicKey, { limit, cursor });
         res.json({ 
-          transactions: result.transactions,
+          transactions: result.transactions.map(withDecodedMuxed),
           next: result.next,
           hasMore: result.hasMore,
         });
@@ -172,7 +248,7 @@ export function createAccountRouter(stellar: StellarService): Router {
         const cursor = req.query.cursor as string | undefined;
         const result = await stellar.getPaymentHistory(req.params.publicKey, { limit, cursor });
         res.json({
-          payments: result.payments,
+          payments: result.payments.map(withDecodedMuxed),
           next: result.next,
           hasMore: result.hasMore,
         });

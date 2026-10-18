@@ -12,6 +12,9 @@ import { getCachedResult, cacheResult } from "../services/idempotency";
 
 const BASE_RESERVE_XLM = 0.5;
 
+// Muxed account IDs are unsigned 64-bit integers.
+const MAX_MUXED_ID = (1n << 64n) - 1n;
+
 interface ReserveBreakdown {
   base: string;
   trustlines: string;
@@ -95,6 +98,24 @@ function computeAssetSpendable(account: StellarSdk.AccountResponse): AssetSpenda
   });
 }
 
+/**
+ * Validate a muxed account ID: a non-negative integer within the uint64 range.
+ * Accepts a number or a decimal string (strings avoid JS precision loss for
+ * IDs above Number.MAX_SAFE_INTEGER).
+ */
+function isValidMuxedId(value: unknown): boolean {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value >= 0 && BigInt(value) <= MAX_MUXED_ID;
+  }
+  if (typeof value === "string") {
+    if (!/^\d+$/.test(value)) {
+      return false;
+    }
+    return BigInt(value) <= MAX_MUXED_ID;
+  }
+  return false;
+}
+
 async function handleIdempotentRequest(
   req: Request,
   res: Response,
@@ -148,6 +169,40 @@ export function createWalletRouter(stellar: StellarService): Router {
         const reserves = computeReserveBreakdown(account);
         const assets = computeAssetSpendable(account);
         res.json({ reserves, assets });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // Generate a muxed (M-address) receive address for a base account. Exchanges
+  // and custodial services use muxed accounts to tag deposits to a sub-account.
+  walletRouter.post(
+    "/:publicKey/muxed",
+    param("publicKey")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(publicKeyMessage),
+    body("id")
+      .exists({ checkNull: true })
+      .bail()
+      .custom(isValidMuxedId)
+      .withMessage("id must be a non-negative integer within the uint64 range"),
+    (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const publicKey = req.params.publicKey;
+        const id = BigInt(req.body.id);
+        const muxed = new StellarSdk.MuxedAccount(
+          StellarSdk.Keypair.fromPublicKey(publicKey),
+          id
+        );
+        res.json({
+          publicKey,
+          id: id.toString(),
+          muxedAccount: muxed.accountId(),
+        });
       } catch (err) {
         next(err);
       }
@@ -212,106 +267,6 @@ export function createWalletRouter(stellar: StellarService): Router {
     body("idempotencyKey").optional().isString().isLength({ max: 255 }),
     (req, res, next) =>
       handleIdempotentRequest(req, res, next, req.body.sourceSecretKey, () => stellar.pathPaymentStrictSend(req.body))
-  );
-
-  walletRouter.post(
-    "/path-payment-strict-receive",
-    body("sourceSecretKey").isLength({ min: 56, max: 56 }),
-    body("destinationPublicKey")
-      .isLength({ min: 56, max: 56 })
-      .bail()
-      .custom(isGAddress)
-      .withMessage(destinationMessage),
-    body("destAmount").isDecimal({ decimal_digits: "0,7" }),
-    body("destAsset").isString(),
-    body("sendMax").isDecimal({ decimal_digits: "0,7" }),
-    body("path").optional().custom((path: unknown) => {
-      if (!Array.isArray(path)) {
-        throw new Error("Path must be an array");
-      }
-      validatePathAssets(path);
-      return true;
-    }),
-    // Stellar's MEMO_TEXT limit is 28 *bytes* once UTF-8 encoded, not 28
-    // characters — `isLength({ max: 28 })` (the previous check here) counts
-    // characters, so it wrongly accepted e.g. a 20-character memo full of
-    // emoji/CJK text that's well over 28 bytes and would be rejected
-    // on-chain. See packages/sdk/src/validate/memo.ts (#103).
-    body("memo").optional().isString().custom(isValidMemoText).withMessage(memoTextMessage),
-    body("idempotencyKey").optional().isString().isLength({ max: 255 }),
-    (req, res, next) =>
-      handleIdempotentRequest(req, res, next, req.body.sourceSecretKey, () => stellar.pathPaymentStrictReceive(req.body))
-  );
-
-  walletRouter.post(
-    "/paths/strict-send",
-    body("sourceAmount").isDecimal({ decimal_digits: "0,7" }),
-    body("sourceAsset").optional().isString(),
-    body("destinationAsset").isString(),
-    body("destinationPublicKey")
-      .optional()
-      .isLength({ min: 56, max: 56 })
-      .bail()
-      .custom(isGAddress)
-      .withMessage(destinationMessage),
-    async (req, res, next) => {
-      try {
-        assertValidRequest(req);
-        const paths = await stellar.findStrictSendPaths(req.body);
-        res.json({ paths });
-      } catch (err) {
-        next(err);
-      }
-    }
-  );
-
-  walletRouter.post(
-    "/paths/strict-receive",
-    body("destinationAmount").isDecimal({ decimal_digits: "0,7" }),
-    body("destinationAsset").isString(),
-    body("sourceAsset").optional().isString(),
-    body("destinationPublicKey")
-      .optional()
-      .isLength({ min: 56, max: 56 })
-      .bail()
-      .custom(isGAddress)
-      .withMessage(destinationMessage),
-    async (req, res, next) => {
-      try {
-        assertValidRequest(req);
-        const paths = await stellar.findStrictReceivePaths(req.body);
-        res.json({ paths });
-      } catch (err) {
-        next(err);
-      }
-    }
-  );
-
-  walletRouter.post(
-    "/partial-transaction",
-    body("sourceSecretKey").isLength({ min: 56, max: 56 }),
-    body("destinationPublicKey")
-      .isLength({ min: 56, max: 56 })
-      .bail()
-      .custom(isGAddress)
-      .withMessage(destinationMessage),
-    body("amount").isDecimal({ decimal_digits: "0,7" }),
-    body("asset").optional().isString(),
-    // Stellar's MEMO_TEXT limit is 28 *bytes* once UTF-8 encoded, not 28
-    // characters — `isLength({ max: 28 })` (the previous check here) counts
-    // characters, so it wrongly accepted e.g. a 20-character memo full of
-    // emoji/CJK text that's well over 28 bytes and would be rejected
-    // on-chain. See packages/sdk/src/validate/memo.ts (#103).
-    body("memo").optional().isString().custom(isValidMemoText).withMessage(memoTextMessage),
-    async (req, res, next) => {
-      try {
-        assertValidRequest(req);
-        const result = await stellar.buildPartialTransaction(req.body);
-        res.json(result);
-      } catch (err) {
-        next(err);
-      }
-    }
   );
 
   return walletRouter;
